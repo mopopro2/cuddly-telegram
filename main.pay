@@ -1,0 +1,88 @@
+import asyncio
+import yfinance as yf
+import pandas as pd
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+import os
+
+TOKEN = os.getenv("BOT_TOKEN")
+
+PAIRS = {
+    "EUR/USD": "EURUSD=X",
+    "GBP/USD": "GBPUSD=X",
+    "USD/JPY": "USDJPY=X",
+    "AUD/USD": "AUDUSD=X",
+    "USD/CAD": "USDCAD=X",
+    "BTC/USD": "BTC-USD",
+    "ETH/USD": "ETH-USD",
+}
+
+def get_rsi(data, period=14):
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def analyze(symbol):
+    df = yf.download(symbol, period="1d", interval="1m", progress=False)
+    if df.empty:
+        return None
+    close = df['Close']
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    rsi = get_rsi(close).iloc[-1]
+    ema9 = close.ewm(span=9).mean().iloc[-1]
+    ema21 = close.ewm(span=21).mean().iloc[-1]
+    last = close.iloc[-1]
+    prev = close.iloc[-2]
+    score = 50
+    reasons = []
+    if rsi > 55:
+        score += 15
+        reasons.append("RSI طالع")
+    elif rsi < 45:
+        score -= 15
+        reasons.append("RSI هابط")
+    if ema9 > ema21:
+        score += 15
+        reasons.append("EMA طالع")
+    else:
+        score -= 15
+        reasons.append("EMA هابط")
+    if last > prev:
+        score += 10
+        reasons.append("اخر شمعة طالعة")
+    else:
+        score -= 10
+        reasons.append("اخر شمعة هابطة")
+    direction = "طلوع" if score >= 50 else "هبوط"
+    strength = score if score >= 50 else 100 - score
+    return direction, int(strength), int(rsi), reasons
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton(name, callback_data=name)] for name in PAIRS.keys()]
+    await update.message.reply_text("اختار الزوج اللي بغيتي نحلل ليك", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    pair = query.data
+    await query.edit_message_text(f"كنحلل {pair}... تسنى 10 ثواني")
+    await asyncio.sleep(10)
+    result = analyze(PAIRS[pair])
+    if not result:
+        await query.edit_message_text("ما قدرتش نجيب السوق دابا، عاود جرب")
+        return
+    direction, strength, rsi, reasons = result
+    text = f"{pair} - 5s / 10s\n\nالنتيجة: {direction}\nالقوة: {strength}%\nRSI: {rsi}\n\nالسبب:\n" + "\n".join([f"- {r}" for r in reasons])
+    await query.edit_message_text(text)
+
+async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start(update, context)
+
+app = ApplicationBuilder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("signal", signal))
+app.add_handler(CallbackQueryHandler(button))
+app.run_polling()
